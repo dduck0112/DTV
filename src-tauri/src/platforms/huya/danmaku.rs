@@ -99,19 +99,21 @@ pub async fn fetch_huya_join_params(room_id: String) -> Result<HuyaJoinParams, S
 #[tauri::command]
 pub async fn start_huya_danmaku_listener(
     payload: crate::platforms::common::GetStreamUrlPayload,
+    key: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::platforms::common::HuyaDanmakuState>,
 ) -> Result<(), String> {
+    let instance_key = crate::platforms::common::normalize_instance_key(key);
     let room_id_or_url = payload.args.room_id_str.clone();
     info!(
         "[Huya Danmaku] start listener room_id_or_url={}",
         room_id_or_url
     );
 
-    // 停止已有监听
+    // 停止同一播放器实例的已有监听
     let previous_tx = {
         let mut lock = state.inner().0.lock().unwrap();
-        lock.take()
+        lock.remove(&instance_key)
     };
     if let Some(tx) = previous_tx {
         if tx.send(()).await.is_err() {
@@ -123,7 +125,7 @@ pub async fn start_huya_danmaku_listener(
     let (tx_shutdown, mut rx_shutdown) = tokio_mpsc::channel::<()>(1);
     {
         let mut lock = state.inner().0.lock().unwrap();
-        *lock = Some(tx_shutdown);
+        lock.insert(instance_key, tx_shutdown);
     }
 
     let app_handle_clone = app_handle.clone();
@@ -239,6 +241,7 @@ pub async fn start_huya_danmaku_listener(
 #[tauri::command]
 pub async fn stop_huya_danmaku_listener(
     room_id: String,
+    key: Option<String>,
     state: tauri::State<'_, crate::platforms::common::HuyaDanmakuState>,
 ) -> Result<(), String> {
     debug!(
@@ -246,20 +249,18 @@ pub async fn stop_huya_danmaku_listener(
         room_id
     );
 
-    // 取出当前监听的停止信号发送器
-    let tx = {
-        let mut lock = state.inner().0.lock().unwrap();
-        lock.take()
-    };
+    // 取出对应播放器实例（未指定 key 时为全部）的停止信号发送器
+    let senders = crate::platforms::common::take_danmaku_senders(&state.inner().0, key);
+    if senders.is_empty() {
+        debug!("[Huya Danmaku] 没有找到活跃的监听器需要停止");
+    }
 
-    if let Some(tx) = tx {
+    for tx in senders {
         if let Err(_) = tx.send(()).await {
             warn!("[Huya Danmaku] 停止信号发送失败，监听器可能已经退出");
         } else {
             info!("[Huya Danmaku] 停止信号已发送给 room_id={}", room_id);
         }
-    } else {
-        debug!("[Huya Danmaku] 没有找到活跃的监听器需要停止");
     }
 
     Ok(())

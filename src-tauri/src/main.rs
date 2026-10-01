@@ -2,8 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use reqwest;
+use std::collections::HashMap;
 use std::panic;
 use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -32,14 +34,44 @@ use platforms::huya::stop_huya_danmaku_listener;
 use platforms::huya::{fetch_huya_live_list, start_huya_danmaku_listener};
 // use platforms::huya::get_huya_stream_url_with_quality; // removed in favor of unified cmd
 
+/// 本地 FLV 代理要转发的上游地址，按播放器实例 key 存放，支持多个直播间同时播放。
+/// 每次写入都会分配新的 generation，代理据此在地址被替换/移除后主动断开旧连接。
 #[derive(Default, Clone)]
 pub struct StreamUrlStore {
-    pub url: Arc<Mutex<String>>,
+    entries: Arc<Mutex<HashMap<String, (String, u64)>>>,
+    next_generation: Arc<AtomicU64>,
 }
 
-// State for managing Douyu danmaku listener handles (stop signals)
+impl StreamUrlStore {
+    pub fn set(&self, key: &str, url: String) -> u64 {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), (url, generation));
+        generation
+    }
+
+    pub fn get(&self, key: &str) -> Option<(String, u64)> {
+        self.entries.lock().unwrap().get(key).cloned()
+    }
+
+    pub fn remove(&self, key: &str) {
+        self.entries.lock().unwrap().remove(key);
+    }
+
+    pub fn clear(&self) {
+        self.entries.lock().unwrap().clear();
+    }
+
+    pub fn is_current(&self, key: &str, generation: u64) -> bool {
+        matches!(self.entries.lock().unwrap().get(key), Some((_, g)) if *g == generation)
+    }
+}
+
+// State for managing Douyu danmaku listener handles (stop signals), keyed by player instance
 #[derive(Default, Clone)]
-pub struct DouyuDanmakuHandles(Arc<Mutex<Option<oneshot::Sender<()>>>>);
+pub struct DouyuDanmakuHandles(Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
 
 #[tauri::command]
 async fn get_stream_url_cmd(room_id: String) -> Result<String, String> {
@@ -81,10 +113,11 @@ async fn get_stream_url_with_quality_cmd(
 #[tauri::command]
 async fn set_stream_url_cmd(
     url: String,
+    key: Option<String>,
     state: tauri::State<'_, StreamUrlStore>,
 ) -> Result<(), String> {
-    let mut current_url = state.url.lock().unwrap();
-    *current_url = url;
+    let key = platforms::common::normalize_instance_key(key);
+    state.set(&key, url);
     Ok(())
 }
 
@@ -92,22 +125,19 @@ async fn set_stream_url_cmd(
 #[tauri::command]
 async fn start_danmaku_listener(
     room_id: String,
+    key: Option<String>,
     window: tauri::Window,
     danmaku_handles: tauri::State<'_, DouyuDanmakuHandles>,
 ) -> Result<(), String> {
-    // Business rule: only one room at a time. Always stop any previous listener first.
+    // One listener per player instance: stop this instance's previous listener first.
+    let instance_key = platforms::common::normalize_instance_key(key);
+    let (stop_tx, stop_rx) = oneshot::channel();
     let previous_sender = {
         let mut lock = danmaku_handles.0.lock().unwrap();
-        lock.take()
+        lock.insert(instance_key, stop_tx)
     };
     if let Some(sender) = previous_sender {
         let _ = sender.send(());
-    }
-
-    let (stop_tx, stop_rx) = oneshot::channel();
-    {
-        let mut lock = danmaku_handles.0.lock().unwrap();
-        *lock = Some(stop_tx);
     }
 
     let window_clone = window.clone();
@@ -133,25 +163,30 @@ async fn start_danmaku_listener(
 #[tauri::command]
 async fn stop_danmaku_listener(
     room_id: String,
+    key: Option<String>,
     danmaku_handles: tauri::State<'_, DouyuDanmakuHandles>,
 ) -> Result<(), String> {
     // The `room_id` parameter is kept for frontend compatibility.
-    // This backend is single-instance, so we always stop the current listener (if any).
-    let sender = {
+    // With a `key`, stop only that player instance's listener; without one, stop all of them.
+    let senders: Vec<oneshot::Sender<()>> = {
         let mut lock = danmaku_handles.0.lock().unwrap();
-        lock.take()
-    };
-    if let Some(sender) = sender {
-        match sender.send(()) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(format!(
-                "Failed to stop Douyu danmaku listener (requested room {}): receiver dropped.",
-                room_id
-            )),
+        match key {
+            Some(k) => lock
+                .remove(&platforms::common::normalize_instance_key(Some(k)))
+                .into_iter()
+                .collect(),
+            None => lock.drain().map(|(_, tx)| tx).collect(),
         }
-    } else {
-        Ok(())
+    };
+    for sender in senders {
+        if sender.send(()).is_err() {
+            eprintln!(
+                "[Rust Main] Douyu danmaku listener (requested room {}) already stopped: receiver dropped.",
+                room_id
+            );
+        }
     }
+    Ok(())
 }
 
 // search_anchor seems fine, assuming douyu::search_anchor is correct

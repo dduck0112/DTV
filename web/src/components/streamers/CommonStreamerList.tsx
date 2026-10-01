@@ -369,6 +369,7 @@ export function CommonStreamerList({
                 role="button"
                 tabIndex={0}
                 onClick={() => onCardClick(room.room_id)}
+                onContextMenu={(e) => playerOverlay.openStreamerMenu(e, { platform, roomId: room.room_id })}
                 onKeyDown={(e) => onCardKeyDown(e, room.room_id)}
                 initial="rest"
                 animate="rest"

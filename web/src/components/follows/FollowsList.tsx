@@ -679,6 +679,7 @@ export function FollowsList() {
           role="button"
           tabIndex={0}
           onClick={() => handleStreamerClick(s.platform, s.id)}
+          onContextMenu={(e) => playerOverlay.openStreamerMenu(e, { platform: s.platform.toLowerCase(), roomId: s.id })}
         >
           <span className={styles.avatarWrap} aria-hidden="true">
             <span className={styles.avatar}>
@@ -937,6 +938,10 @@ export function FollowsList() {
                               if (overlayDeleteMode) return;
                               playerOverlay.openPlayer({ platform: s.platform.toLowerCase(), roomId: s.id });
                               closeOverlay();
+                            }}
+                            onContextMenu={(e) => {
+                              if (overlayDeleteMode) return;
+                              playerOverlay.openStreamerMenu(e, { platform: s.platform.toLowerCase(), roomId: s.id }, closeOverlay);
                             }}
                           >
                             {overlayDeleteMode ? (

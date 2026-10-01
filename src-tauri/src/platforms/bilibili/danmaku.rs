@@ -10,15 +10,17 @@ use crate::platforms::bilibili::websocket::BiliLiveClient;
 pub async fn start_bilibili_danmaku_listener(
     payload: crate::platforms::common::GetStreamUrlPayload,
     cookie: Option<String>,
+    key: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::platforms::common::BilibiliDanmakuState>,
 ) -> Result<(), String> {
     let room_id = payload.args.room_id_str.clone();
+    let instance_key = crate::platforms::common::normalize_instance_key(key);
 
-    // stop previous listener if exists
+    // stop previous listener of the same player instance if exists
     let previous_tx = {
         let mut lock = state.inner().0.lock().unwrap();
-        lock.take()
+        lock.remove(&instance_key)
     };
     if let Some(tx) = previous_tx {
         if tx.send(()).await.is_err() {
@@ -29,7 +31,7 @@ pub async fn start_bilibili_danmaku_listener(
     let (tx_shutdown, mut rx_shutdown) = tokio_mpsc::channel::<()>(1);
     {
         let mut lock = state.inner().0.lock().unwrap();
-        *lock = Some(tx_shutdown);
+        lock.insert(instance_key, tx_shutdown);
     }
 
     let app_handle_clone = app_handle.clone();
@@ -99,18 +101,13 @@ pub async fn start_bilibili_danmaku_listener(
 
 #[tauri::command]
 pub async fn stop_bilibili_danmaku_listener(
+    key: Option<String>,
     state: tauri::State<'_, crate::platforms::common::BilibiliDanmakuState>,
 ) -> Result<(), String> {
-    let previous_tx = {
-        let mut lock = state.inner().0.lock().unwrap();
-        lock.take()
-    };
-    if let Some(tx) = previous_tx {
-        match tx.send(()).await {
-            Ok(()) => Ok(()),
-            Err(_) => Err("停止Bilibili弹幕监听失败：接收方已关闭".to_string()),
+    for tx in crate::platforms::common::take_danmaku_senders(&state.inner().0, key) {
+        if tx.send(()).await.is_err() {
+            eprintln!("[Bilibili Danmaku] 停止弹幕监听失败：接收方已关闭");
         }
-    } else {
-        Ok(())
     }
+    Ok(())
 }

@@ -602,9 +602,12 @@ export function Navbar({
                       key={`${anchor.platform}-${anchor.roomId}`}
                       className={styles.searchResultItem}
                       onMouseDown={(e) => {
+                        // 保持搜索框焦点（否则结果列表会收起）；只有左键才直接打开，右键交给菜单
                         e.preventDefault();
+                        if (e.button !== 0) return;
                         navigateToPlayer(anchor.platform, anchor.roomId);
                       }}
+                      onContextMenu={(e) => playerOverlay.openStreamerMenu(e, { platform: anchor.platform, roomId: anchor.roomId })}
                     >
                       <div className={styles.resultAvatar}>
                         {anchor.avatar ? (

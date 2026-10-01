@@ -10,14 +10,10 @@ enum ConnectionOutcome {
 
 #[tauri::command]
 pub async fn stop_douyin_danmu_listener(
+    key: Option<String>,
     state: tauri::State<'_, crate::platforms::common::DouyinDanmakuState>,
 ) -> Result<(), String> {
-    let previous_tx = {
-        let mut lock = state.inner().0.lock().unwrap();
-        lock.take()
-    };
-
-    if let Some(tx) = previous_tx {
+    for tx in crate::platforms::common::take_danmaku_senders(&state.inner().0, key) {
         if tx.send(()).await.is_err() {
             eprintln!("[Douyin Danmaku] Failed to send shutdown. Task might have already completed or panicked.");
         }
@@ -29,9 +25,11 @@ pub async fn stop_douyin_danmu_listener(
 #[tauri::command]
 pub async fn start_douyin_danmu_listener(
     payload: crate::platforms::common::GetStreamUrlPayload,
+    key: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::platforms::common::DouyinDanmakuState>,
 ) -> Result<(), String> {
+    let instance_key = crate::platforms::common::normalize_instance_key(key);
     let room_id_or_url = payload.args.room_id_str;
     println!(
         "[Douyin Danmaku] Received request for room_id_or_url: {}",
@@ -40,7 +38,7 @@ pub async fn start_douyin_danmu_listener(
 
     let previous_tx = {
         let mut lock = state.inner().0.lock().unwrap();
-        lock.take()
+        lock.remove(&instance_key)
     };
 
     if let Some(tx) = previous_tx {
@@ -62,7 +60,7 @@ pub async fn start_douyin_danmu_listener(
     let (tx_shutdown, mut rx_shutdown) = tokio_mpsc::channel::<()>(1);
     {
         let mut lock = state.inner().0.lock().unwrap();
-        *lock = Some(tx_shutdown);
+        lock.insert(instance_key, tx_shutdown);
     }
 
     let app_handle_clone = app_handle.clone();

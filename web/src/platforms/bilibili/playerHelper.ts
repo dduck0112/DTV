@@ -10,6 +10,7 @@ export async function getBilibiliStreamConfig(
   roomId: string,
   quality: string = '原画',
   cookie?: string,
+  proxyKey?: string,
 ): Promise<{ streamUrl: string, streamType: string | undefined }> {
   if (!roomId) {
     throw new Error('房间ID未提供');
@@ -26,6 +27,7 @@ export async function getBilibiliStreamConfig(
         payload: payloadData,
         quality,
         cookie: effectiveCookie || null,
+        proxyKey: proxyKey ?? null,
       });
       result = fetched;
 

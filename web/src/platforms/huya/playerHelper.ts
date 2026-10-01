@@ -4,15 +4,15 @@ import type { Ref } from '../common/ref';
 import type { DanmakuMessage, DanmuOverlayInstance, DanmuRenderOptions } from '../../components/player/types';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '@/utils/logger';
+import { stopStreamProxy } from '@/platforms/common/streamProxy';
 
 export interface HuyaUnifiedEntry { quality: string; bitRate: number; url: string; }
-
-let huyaProxyActive = false;
 
 export async function getHuyaStreamConfig(
   roomId: string,
   quality: string = '原画',
   line?: string | null,
+  proxyKey?: string,
 ): Promise<{
   streamUrl: string;
   streamType: string | undefined;
@@ -39,15 +39,13 @@ export async function getHuyaStreamConfig(
         // 对齐 pure_live：虎牙播放需要稳定的 UA/Referer/Origin；WebView 无法给 FLV 请求加自定义 Header，走本地 proxy 注入。
         let finalStreamUrl = sanitizedUpstream;
         try {
-          await invoke('set_stream_url_cmd', { url: sanitizedUpstream });
-          const proxyUrl = await invoke<string>('start_proxy');
+          await invoke('set_stream_url_cmd', { url: sanitizedUpstream, key: proxyKey ?? null });
+          const proxyUrl = await invoke<string>('start_proxy', { key: proxyKey ?? null });
           if (proxyUrl) {
             finalStreamUrl = proxyUrl;
-            huyaProxyActive = true;
           }
         } catch {
           // proxy 非关键：失败则回退直连（避免阻断播放），但可能更容易断流
-          huyaProxyActive = false;
         }
 
         return {
@@ -88,15 +86,8 @@ export async function getHuyaStreamConfig(
   throw new Error('主播未开播或无法获取直播流');
 }
 
-export async function stopHuyaProxy(): Promise<void> {
-  if (!huyaProxyActive) return;
-  try {
-    await invoke('stop_proxy');
-  } catch {
-    // ignore
-  } finally {
-    huyaProxyActive = false;
-  }
+export async function stopHuyaProxy(proxyKey?: string): Promise<void> {
+  await stopStreamProxy(proxyKey);
 }
 
 // 统一的 Rust 弹幕事件负载（与 Douyin/Douyu 保持一致）

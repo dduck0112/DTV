@@ -1,11 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
-
-let douyuProxyActive = false;
+import { stopStreamProxy } from '@/platforms/common/streamProxy';
 
 export async function getDouyuStreamConfig(
   roomId: string,
   quality: string = '原画',
   line?: string | null,
+  proxyKey?: string,
 ): Promise<{ streamUrl: string, streamType: string | undefined }> {
   let finalStreamUrl: string | null = null;
   let streamType: string | undefined = undefined;
@@ -57,26 +57,16 @@ export async function getDouyuStreamConfig(
   }
 
   try {
-    await invoke('set_stream_url_cmd', { url: finalStreamUrl });
-    const proxyUrl = await invoke<string>('start_proxy');
-    douyuProxyActive = true;
+    await invoke('set_stream_url_cmd', { url: finalStreamUrl, key: proxyKey ?? null });
+    const proxyUrl = await invoke<string>('start_proxy', { key: proxyKey ?? null });
     return { streamUrl: proxyUrl, streamType };
   } catch (e: any) {
     throw new Error(`设置斗鱼代理失败: ${e.message}`);
   }
 }
 
-export async function stopDouyuProxy(): Promise<void> {
-  if (!douyuProxyActive) {
-    return;
-  }
-  try {
-    await invoke('stop_proxy');
-    douyuProxyActive = false;
-  } catch (e) {
-    console.error('[DouyuPlayerHelper] Error stopping proxy server:', e);
-    douyuProxyActive = false;
-  }
+export async function stopDouyuProxy(proxyKey?: string): Promise<void> {
+  await stopStreamProxy(proxyKey);
 }
 
 function enforceHttps(url: string): string {

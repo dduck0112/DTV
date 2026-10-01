@@ -2,7 +2,7 @@
 
 import React, { useMemo } from "react";
 
-import { MainPlayer } from "@/components/player/MainPlayer";
+import { MainPlayer, type PlayerMeta } from "@/components/player/MainPlayer";
 import { Platform } from "@/platforms/common/types";
 
 function toPlatformEnum(p: string): Platform {
@@ -16,11 +16,17 @@ function toPlatformEnum(p: string): Platform {
 export function PlayerPage({
   platform,
   roomId,
-  onRequestClose
+  onRequestClose,
+  instanceKey,
+  active,
+  onMetaChange
 }: {
   platform: string;
   roomId: string;
   onRequestClose?: () => void;
+  instanceKey?: string;
+  active?: boolean;
+  onMetaChange?: (meta: PlayerMeta) => void;
 }) {
   const plat = useMemo(() => toPlatformEnum(platform), [platform]);
   if (!roomId) {
@@ -30,5 +36,14 @@ export function PlayerPage({
       </div>
     );
   }
-  return <MainPlayer platform={plat} roomId={roomId} onRequestClose={onRequestClose} />;
+  return (
+    <MainPlayer
+      platform={plat}
+      roomId={roomId}
+      onRequestClose={onRequestClose}
+      instanceKey={instanceKey}
+      active={active}
+      onMetaChange={onMetaChange}
+    />
+  );
 }

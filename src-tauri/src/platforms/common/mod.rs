@@ -12,3 +12,4 @@ pub use types::DouyuDanmakuState;
 pub use types::GetStreamUrlPayload;
 pub use types::HuyaDanmakuState;
 pub use types::LiveStreamInfo;
+pub use types::{normalize_instance_key, take_danmaku_senders};

@@ -1,18 +1,20 @@
 use actix_web::{dev::ServerHandle, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use reqwest::Client;
 // awc removed for now due to API differences; using reqwest streaming
+use crate::platforms::common::normalize_instance_key;
 use crate::StreamUrlStore;
 use serde::Deserialize;
 use std::io::ErrorKind;
 use std::net::TcpStream;
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tauri::{AppHandle, State};
 
-// Define a struct to hold the server handle in a Tauri managed state
+// Define a struct to hold the server handle in a Tauri managed state.
+// The FLV proxy server is shared by all player instances and stays up once started;
+// an async mutex serializes the first start so concurrent players never race on bind().
 #[derive(Default)]
-pub struct ProxyServerHandle(pub StdMutex<Option<ServerHandle>>);
+pub struct ProxyServerHandle(pub tokio::sync::Mutex<Option<ServerHandle>>);
 
 // Align with pure_live-master's Huya playback UA
 const HUYA_HYSDK_UA: &str =
@@ -26,6 +28,11 @@ async fn find_free_port() -> u16 {
 #[derive(Deserialize)]
 struct ImageQuery {
     url: String,
+}
+
+#[derive(Deserialize)]
+struct FlvQuery {
+    key: Option<String>,
 }
 
 async fn image_proxy_handler(
@@ -120,17 +127,22 @@ async fn image_proxy_handler(
 // Your actual proxy logic - this is a simplified placeholder
 async fn flv_proxy_handler(
     _req: HttpRequest,
+    query: web::Query<FlvQuery>,
     stream_url_store: web::Data<StreamUrlStore>,
     client: web::Data<Client>,
 ) -> impl Responder {
-    let url = stream_url_store.url.lock().unwrap().clone();
-    if url.is_empty() {
-        return HttpResponse::NotFound().body("Stream URL is not set or empty.");
-    }
+    let key = normalize_instance_key(query.key.clone());
+    let (url, generation) = match stream_url_store.get(&key) {
+        Some((url, generation)) if !url.is_empty() => (url, generation),
+        _ => {
+            return HttpResponse::NotFound()
+                .body(format!("Stream URL is not set for key '{}'.", key))
+        }
+    };
 
     println!(
-        "[Rust/proxy.rs handler] Incoming FLV proxy request -> {}",
-        url
+        "[Rust/proxy.rs handler] Incoming FLV proxy request [{}] -> {}",
+        key, url
     );
 
     let mut req = client
@@ -162,16 +174,31 @@ async fn flv_proxy_handler(
                     .insert_header(("Cache-Control", "no-store"))
                     .insert_header(("Accept-Ranges", "bytes"));
 
-                let byte_stream = upstream_response.bytes_stream().map_err(|e| {
-                    eprintln!(
-                        "[Rust/proxy.rs handler] Error reading bytes from upstream: {}",
-                        e
-                    );
-                    actix_web::error::ErrorInternalServerError(format!(
-                        "Upstream stream error: {}",
-                        e
-                    ))
-                });
+                // 该 key 的地址被替换或移除（切换直播间/关闭标签）后，结束这条旧连接。
+                let store_for_stream = stream_url_store.clone();
+                let key_for_stream = key.clone();
+                let byte_stream = upstream_response
+                    .bytes_stream()
+                    .map_err(|e| {
+                        eprintln!(
+                            "[Rust/proxy.rs handler] Error reading bytes from upstream: {}",
+                            e
+                        );
+                        actix_web::error::ErrorInternalServerError(format!(
+                            "Upstream stream error: {}",
+                            e
+                        ))
+                    })
+                    .take_while(move |_| {
+                        let alive = store_for_stream.is_current(&key_for_stream, generation);
+                        if !alive {
+                            println!(
+                                "[Rust/proxy.rs handler] Stream [{}] superseded, closing upstream.",
+                                key_for_stream
+                            );
+                        }
+                        futures_util::future::ready(alive)
+                    });
 
                 response_builder.streaming(byte_stream)
             } else {
@@ -213,23 +240,43 @@ pub async fn start_proxy(
     _app_handle: AppHandle,
     server_handle_state: State<'_, ProxyServerHandle>,
     stream_url_store: State<'_, StreamUrlStore>,
+    key: Option<String>,
 ) -> Result<String, String> {
     let port = find_free_port().await;
-    let current_stream_url = stream_url_store.url.lock().unwrap().clone();
+    let key = normalize_instance_key(key);
+    let generation = match stream_url_store.get(&key) {
+        Some((url, generation)) if !url.is_empty() => generation,
+        _ => {
+            return Err(format!(
+                "Stream URL is not set in store for key '{}'. Cannot start proxy.",
+                key
+            ))
+        }
+    };
+    // `g` makes every registration a distinct URL, so the player never reuses a stale connection.
+    let proxy_url = format!(
+        "http://127.0.0.1:{}/live.flv?key={}&g={}",
+        port, key, generation
+    );
 
-    if current_stream_url.is_empty() {
-        return Err("Stream URL is not set in store. Cannot start proxy.".to_string());
+    let mut server_handle_guard = server_handle_state.0.lock().await;
+    if server_handle_guard.is_some() {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            // Shared server already running: the new key is served immediately.
+            return Ok(proxy_url);
+        }
+        eprintln!(
+            "[Rust/proxy.rs] Proxy server handle exists but port {} is not reachable; restarting.",
+            port
+        );
+        if let Some(stale_handle) = server_handle_guard.take() {
+            stale_handle.stop(false).await;
+        }
     }
 
     // stream_url_data_for_actix can be created once and cloned, as StreamUrlStore is Arc based and Send + Sync
     let stream_url_data_for_actix = web::Data::new(stream_url_store.inner().clone());
     // REMOVED: let awc_client_for_actix = web::Data::new(Client::default());
-
-    // Ensure MutexGuard is dropped before .await
-    let existing_handle_to_stop = { server_handle_state.0.lock().unwrap().take() };
-    if let Some(existing_handle) = existing_handle_to_stop {
-        existing_handle.stop(false).await;
-    }
 
     let server = match HttpServer::new(move || {
         let app_data_stream_url = stream_url_data_for_actix.clone();
@@ -270,8 +317,8 @@ pub async fn start_proxy(
     }
     .run();
 
-    let server_handle_for_state = server.handle();
-    *server_handle_state.0.lock().unwrap() = Some(server_handle_for_state);
+    *server_handle_guard = Some(server.handle());
+    drop(server_handle_guard);
 
     // Use tauri::async_runtime::spawn directly
     tauri::async_runtime::spawn(async move {
@@ -282,7 +329,6 @@ pub async fn start_proxy(
         }
     });
 
-    let proxy_url = format!("http://127.0.0.1:{}/live.flv", port);
     Ok(proxy_url)
 }
 
@@ -361,15 +407,22 @@ pub async fn start_static_proxy_server(
 }
 
 #[tauri::command]
-pub async fn stop_proxy(server_handle_state: State<'_, ProxyServerHandle>) -> Result<(), String> {
-    // Ensure MutexGuard is dropped before .await
-    let handle_to_stop = { server_handle_state.0.lock().unwrap().take() };
-
-    if let Some(handle) = handle_to_stop {
-        handle.stop(false).await; // Changed to non-graceful shutdown
-        println!("[Rust/proxy.rs] stop_proxy: Initiated non-graceful shutdown.");
-    } else {
-        println!("[Rust/proxy.rs] stop_proxy command: No proxy server was running or handle already taken.");
+pub async fn stop_proxy(
+    stream_url_store: State<'_, StreamUrlStore>,
+    key: Option<String>,
+) -> Result<(), String> {
+    // The shared server keeps running for the other players; unregistering the key is enough,
+    // because the streaming response closes itself once its key is no longer current.
+    match key {
+        Some(k) => {
+            let key = normalize_instance_key(Some(k));
+            stream_url_store.remove(&key);
+            println!("[Rust/proxy.rs] stop_proxy: unregistered stream [{}].", key);
+        }
+        None => {
+            stream_url_store.clear();
+            println!("[Rust/proxy.rs] stop_proxy: unregistered all streams.");
+        }
     }
     Ok(())
 }

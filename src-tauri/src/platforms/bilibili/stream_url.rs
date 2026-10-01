@@ -14,8 +14,10 @@ pub async fn get_bilibili_live_stream_url_with_quality(
     payload: crate::platforms::common::GetStreamUrlPayload,
     quality: String,
     cookie: Option<String>,
+    proxy_key: Option<String>,
 ) -> Result<crate::platforms::common::LiveStreamInfo, String> {
     let room_id = payload.args.room_id_str.clone();
+    let proxy_key = crate::platforms::common::normalize_instance_key(proxy_key);
     if room_id.trim().is_empty() {
         return Ok(crate::platforms::common::LiveStreamInfo {
             title: None,
@@ -490,13 +492,17 @@ pub async fn get_bilibili_live_stream_url_with_quality(
 
     match selected_stream {
         SelectedStream::Flv(real_url) => {
-            // FLV：写入到 Store 并启动代理
+            // FLV：按播放器实例 key 写入 Store 并确保代理已启动
             let proxied_url = {
+                stream_url_store.set(&proxy_key, real_url.clone());
+                match start_proxy(
+                    app_handle,
+                    proxy_server_handle,
+                    stream_url_store,
+                    Some(proxy_key.clone()),
+                )
+                .await
                 {
-                    let mut current_url_in_store = stream_url_store.url.lock().unwrap();
-                    *current_url_in_store = real_url.clone();
-                }
-                match start_proxy(app_handle, proxy_server_handle, stream_url_store).await {
                     Ok(proxy) => Some(proxy),
                     Err(e) => {
                         eprintln!("[Bilibili] Failed to start proxy: {}", e);
@@ -525,18 +531,8 @@ pub async fn get_bilibili_live_stream_url_with_quality(
             })
         }
         SelectedStream::Hls(real_url) => {
-            // HLS：无需本地代理，若存在旧的 FLV 代理则关闭并清空存储
-            {
-                let handle_to_stop = { proxy_server_handle.0.lock().unwrap().take() };
-                if let Some(handle) = handle_to_stop {
-                    handle.stop(false).await;
-                    eprintln!("[Bilibili] Stopped existing FLV proxy before using HLS stream");
-                }
-            }
-            {
-                let mut current_url_in_store = stream_url_store.url.lock().unwrap();
-                *current_url_in_store = String::new();
-            }
+            // HLS：无需本地代理，注销该实例之前的 FLV 地址（旧连接会随之断开）
+            stream_url_store.remove(&proxy_key);
 
             Ok(crate::platforms::common::LiveStreamInfo {
                 title: init_json["data"]["title"].as_str().map(|s| s.to_string()),

@@ -29,3 +29,250 @@
   display: flex;
   flex-direction: column;
 }
+
+/* ---------- 多开标签栏 ---------- */
+
+/* 播放器层：每个标签页一个 slot，叠放在一起，只显示当前标签 */
+.playerStack {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.playerSlot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.playerSlotActive {
+  z-index: 1;
+}
+
+/* 后台标签：继续播放（保留声音），只是不可见、不可交互。
+   用 opacity 而不是 display:none，避免播放器/弹幕层因尺寸为 0 出现异常。 */
+.playerSlotHidden {
+  z-index: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tabBar {
+  position: relative;
+  z-index: 30;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: #111114;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  scrollbar-width: none;
+}
+
+.tabBar::-webkit-scrollbar {
+  display: none;
+}
+
+/* 只开一个直播间时：标签栏默认收起，鼠标移到顶部才滑出（右侧让出窗口按钮区域） */
+.tabBarFloating {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 140px;
+  border-bottom-right-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  transform: translateY(-100%);
+  pointer-events: none;
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+
+.tabBarFloatingRevealed {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.tabHotzone {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 140px;
+  height: 6px;
+  z-index: 31;
+}
+
+.tabBarDragArea {
+  flex: 1 0 24px;
+  align-self: stretch;
+}
+
+.tab {
+  flex: 0 1 200px;
+  min-width: 96px;
+  max-width: 220px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 6px;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.62);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.tab:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.tabActive,
+.tabActive:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.tabOffline .tabName {
+  opacity: 0.6;
+}
+
+.tab:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.5);
+  outline-offset: -2px;
+}
+
+.tabAvatar {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.tabAvatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.tabAvatarFallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.tabPlatform {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.tabName {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tabClose {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  border: none;
+  color: inherit;
+  background: transparent !important;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.tabClose:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.14) !important;
+}
+
+.tabClose svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* ---------- 主播右键菜单 ---------- */
+
+.menuBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: transparent;
+}
+
+.contextMenu {
+  position: fixed;
+  z-index: 2001;
+  min-width: 160px;
+  padding: 4px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(28, 32, 34, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.24),
+    0 24px 44px rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(14px);
+}
+
+:global(:root[data-theme="light"]) .contextMenu {
+  background: rgba(255, 255, 255, 0.97);
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+.menuItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 8px;
+  font-size: var(--text-sm, 13px);
+  font-weight: var(--weight-bold, 700);
+  color: var(--primary-text);
+  background: transparent !important;
+  cursor: pointer;
+}
+
+.menuItem:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+:global(:root[data-theme="light"]) .menuItem:hover {
+  background: rgba(15, 23, 42, 0.06) !important;
+}

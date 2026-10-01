@@ -603,7 +603,9 @@
 
 .followOverlayPanel {
   width: 100%;
-  max-height: 100%;
+  /* 父级 .followOverlayAnchor 只有 max-height、没有确定高度，这里写 100% 会失效：
+     关注多时面板被内容撑出窗口（上下都被裁掉），内部列表也无法滚动。直接用视口高度限制。 */
+  max-height: calc(100vh - 96px);
   border-radius: 22px;
   background: rgba(28, 32, 34, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.14);

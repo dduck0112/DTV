@@ -27,8 +27,8 @@ import {
 } from "@/components/player/constants";
 import { arrangeControlClusters } from "@/components/player/controlLayout";
 import { Platform } from "@/platforms/common/types";
-import { getDouyuStreamConfig, stopDouyuProxy } from "@/platforms/douyu/playerHelper";
-import { stopHuyaProxy } from "@/platforms/huya/playerHelper";
+import { getDouyuStreamConfig } from "@/platforms/douyu/playerHelper";
+import { stopStreamProxy } from "@/platforms/common/streamProxy";
 import { fetchAndPrepareDouyinStreamConfig } from "@/platforms/douyin/playerHelper";
 import { getHuyaStreamConfig } from "@/platforms/huya/playerHelper";
 import { getBilibiliStreamConfig } from "@/platforms/bilibili/playerHelper";
@@ -36,11 +36,16 @@ import { useImageProxy } from "@/hooks/useImageProxy";
 import { useFollow, type FollowedStreamer, type Platform as FollowPlatform } from "@/state/follow/FollowProvider";
 import { usePlayerUi } from "@/state/playerUi/PlayerUiProvider";
 
-declare global {
-  // Used to guard against React StrictMode(dev) mount/unmount cycles accidentally stopping a newer player session.
-  // eslint-disable-next-line no-var
-  var __DTV_PLAYER_MOUNT_GEN: number | undefined;
-}
+// Per-instance mount generation. Used to guard against React StrictMode(dev) mount/unmount cycles
+// accidentally stopping a newer session of the same player instance (other instances are unaffected).
+const playerMountGenByInstance = new Map<string, number>();
+
+export type PlayerMeta = {
+  anchorName: string | null;
+  title: string | null;
+  avatarUrl: string | null;
+  isLive: boolean | null;
+};
 
 const qualityOptions = ["原画", "高清", "标清"] as const;
 
@@ -174,11 +179,19 @@ function resolveCurrentLineFor(options: LineOption[], currentLine: string | null
 export function MainPlayer({
   platform,
   roomId,
-  onRequestClose
+  onRequestClose,
+  instanceKey = "main",
+  active = true,
+  onMetaChange
 }: {
   platform: Platform;
   roomId: string;
   onRequestClose?: () => void;
+  /** 播放器实例 key：后端按它区分代理流与弹幕监听，多开时每个标签页各不相同。 */
+  instanceKey?: string;
+  /** 是否为当前可见的标签页；后台标签继续播放（保留声音），但不接管全局 UI 与快捷键。 */
+  active?: boolean;
+  onMetaChange?: (meta: PlayerMeta) => void;
 }) {
   const router = useRouter();
   const follow = useFollow();
@@ -535,6 +548,7 @@ export function MainPlayer({
   }, [ensureProxyStarted, platform]);
 
   useEffect(() => {
+    if (!active) return;
     setIsland({
       platform,
       roomId,
@@ -543,12 +557,40 @@ export function MainPlayer({
       avatarUrl: getAvatarSrc(platform, playerAvatar)
     });
     return () => clearIsland();
-  }, [clearIsland, getAvatarSrc, platform, playerAvatar, playerAnchorName, playerTitle, roomId, setIsland]);
+  }, [active, clearIsland, getAvatarSrc, platform, playerAvatar, playerAnchorName, playerTitle, roomId, setIsland]);
 
   useEffect(() => {
+    if (!active) return;
     setFullscreen(isFullScreen);
     return () => setFullscreen(false);
-  }, [isFullScreen, setFullscreen]);
+  }, [active, isFullScreen, setFullscreen]);
+
+  const onMetaChangeRef = useRef(onMetaChange);
+  onMetaChangeRef.current = onMetaChange;
+  useEffect(() => {
+    onMetaChangeRef.current?.({
+      anchorName: playerAnchorName,
+      title: playerTitle,
+      avatarUrl: getAvatarSrc(platform, playerAvatar),
+      isLive: playerIsLive
+    });
+  }, [getAvatarSrc, platform, playerAnchorName, playerAvatar, playerIsLive, playerTitle]);
+
+  // 后台标签不响应 xgplayer 的全局快捷键（空格/方向键），避免一次按键同时控制多个直播间。
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const syncKeyboardShortcuts = useCallback(() => {
+    try {
+      const keyboard = playerRef.current?.getPlugin?.("keyboard");
+      if (activeRef.current) keyboard?.enable?.();
+      else keyboard?.disable?.();
+    } catch {
+      // ignore
+    }
+  }, []);
+  useEffect(() => {
+    syncKeyboardShortcuts();
+  }, [active, syncKeyboardShortcuts]);
 
   const isFollowed = useMemo(() => {
     const fp: FollowPlatform =
@@ -596,43 +638,34 @@ export function MainPlayer({
     setIsFullScreen(false);
   }, []);
 
-  const stopAllDanmakuBackends = useCallback(async () => {
-    // Business rule: only one room at a time. Stopping all backends is the safest way to avoid cross-platform leaks.
+  const stopDanmakuBackends = useCallback(async () => {
+    // Stop this instance's listeners on every platform (other open rooms keep theirs) to avoid cross-platform leaks.
     try {
-      await invoke("stop_danmaku_listener", { roomId: "" });
+      await invoke("stop_danmaku_listener", { roomId: "", key: instanceKey });
     } catch {
       // ignore
     }
     try {
-      await invoke("stop_douyin_danmu_listener");
+      await invoke("stop_douyin_danmu_listener", { key: instanceKey });
     } catch {
       // ignore
     }
     try {
-      await invoke("stop_huya_danmaku_listener", { roomId: "" });
+      await invoke("stop_huya_danmaku_listener", { roomId: "", key: instanceKey });
     } catch {
       // ignore
     }
     try {
-      await invoke("stop_bilibili_danmaku_listener");
+      await invoke("stop_bilibili_danmaku_listener", { key: instanceKey });
     } catch {
       // ignore
     }
-  }, []);
+  }, [instanceKey]);
 
-  const stopAllProxies = useCallback(async () => {
-    // Only one room at a time; stop both to avoid "switch platform" leaks.
-    try {
-      await stopDouyuProxy();
-    } catch {
-      // ignore
-    }
-    try {
-      await stopHuyaProxy();
-    } catch {
-      // ignore
-    }
-  }, []);
+  const stopProxy = useCallback(async () => {
+    // Unregister only this instance's stream; the shared proxy keeps serving the other rooms.
+    await stopStreamProxy(instanceKey);
+  }, [instanceKey]);
 
   const startDanmaku = useCallback(
     async (
@@ -658,22 +691,23 @@ export function MainPlayer({
          } catch {
            // ignore
          }
-         // Always stop existing backends first (cross-platform), then start the current one.
-         await stopAllDanmakuBackends();
+         // Always stop this instance's existing backends first (cross-platform), then start the current one.
+         await stopDanmakuBackends();
          if (!isSessionActive(sessionId)) return;
 
          if (platformToStart === Platform.DOUYU) {
-           await invoke("start_danmaku_listener", { roomId: roomIdToStart });
+           await invoke("start_danmaku_listener", { roomId: roomIdToStart, key: instanceKey });
          } else if (platformToStart === Platform.DOUYIN) {
            const payload: RustGetStreamUrlPayload = { args: { room_id_str: roomIdToStart }, platform: Platform.DOUYIN };
-           await invoke("start_douyin_danmu_listener", { payload });
+           await invoke("start_douyin_danmu_listener", { payload, key: instanceKey });
          } else if (platformToStart === Platform.HUYA) {
-           await invoke("start_huya_danmaku_listener", { payload: { args: { room_id_str: roomIdToStart } } });
+           await invoke("start_huya_danmaku_listener", { payload: { args: { room_id_str: roomIdToStart } }, key: instanceKey });
          } else if (platformToStart === Platform.BILIBILI) {
            const cookie = typeof localStorage !== "undefined" ? localStorage.getItem("bilibili_cookie") : null;
            await invoke("start_bilibili_danmaku_listener", {
              payload: { args: { room_id_str: roomIdToStart } },
-             cookie: cookie || null
+             cookie: cookie || null,
+             key: instanceKey
            });
          }
        } catch (e) {
@@ -726,7 +760,7 @@ export function MainPlayer({
 
       unlistenRef.current = unlisten;
     },
-    [isDanmuEnabled, isSessionActive, stopAllDanmakuBackends]
+    [instanceKey, isDanmuEnabled, isSessionActive, stopDanmakuBackends]
   );
 
   const mountPlayer = useCallback(
@@ -884,6 +918,7 @@ export function MainPlayer({
         return;
       }
       playbackKindRef.current = isHlsPlayback ? "hls" : "flv";
+      syncKeyboardShortcuts();
 
       try {
         const storedPlayerVolume = loadStoredVolume();
@@ -994,7 +1029,7 @@ export function MainPlayer({
       await startDanmaku(sessionId, overlay, platform, backendRoomId, filterRoomId);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentLine, currentQuality, danmuSettings, isDanmuEnabled, isSessionActive, lineOptions, platform, roomId, startDanmaku]
+    [currentLine, currentQuality, danmuSettings, isDanmuEnabled, isSessionActive, lineOptions, platform, roomId, startDanmaku, syncKeyboardShortcuts]
   );
 
   const reloadStream = useCallback(
@@ -1018,8 +1053,8 @@ export function MainPlayer({
       const effectiveQuality = overrides?.quality ?? currentQuality;
       const effectiveLine = typeof overrides?.line !== "undefined" ? overrides.line : currentLine;
 
-      await stopAllDanmakuBackends();
-      await stopAllProxies();
+      await stopDanmakuBackends();
+      await stopProxy();
       if (!isSessionActive(sessionId)) return;
 
       try {
@@ -1039,7 +1074,7 @@ export function MainPlayer({
           } catch {
             // ignore meta fetch failures
           }
-          const { streamUrl, streamType } = await getDouyuStreamConfig(roomId, effectiveQuality, resolvedLine);
+          const { streamUrl, streamType } = await getDouyuStreamConfig(roomId, effectiveQuality, resolvedLine, instanceKey);
           if (!isSessionActive(sessionId)) return;
           setPlayerIsLive(true);
           const nextIsHls = (streamType || "").toLowerCase() === "hls" || streamUrl.toLowerCase().includes(".m3u8");
@@ -1108,7 +1143,8 @@ export function MainPlayer({
           const { streamUrl, streamType, title, anchorName, avatar, isLive } = await getHuyaStreamConfig(
             roomId,
             effectiveQuality,
-            resolvedLine
+            resolvedLine,
+            instanceKey
           );
           if (!isSessionActive(sessionId)) return;
           setPlayerTitle(title ?? null);
@@ -1151,7 +1187,7 @@ export function MainPlayer({
           } catch {
             // ignore meta fetch failures
           }
-          const { streamUrl, streamType } = await getBilibiliStreamConfig(roomId, effectiveQuality, cookie || undefined);
+          const { streamUrl, streamType } = await getBilibiliStreamConfig(roomId, effectiveQuality, cookie || undefined, instanceKey);
           if (!isSessionActive(sessionId)) return;
           setPlayerIsLive(true);
           const nextIsHls = (streamType || "").toLowerCase() === "hls" || streamUrl.toLowerCase().includes(".m3u8");
@@ -1201,7 +1237,7 @@ export function MainPlayer({
         }
       }
     },
-    [currentLine, currentQuality, destroyPlayer, isSessionActive, lineOptions, mountPlayer, platform, roomId, stopAllDanmakuBackends, stopAllProxies]
+    [currentLine, currentQuality, destroyPlayer, instanceKey, isSessionActive, lineOptions, mountPlayer, platform, roomId, stopDanmakuBackends, stopProxy]
   );
 
   useEffect(() => {
@@ -1210,26 +1246,28 @@ export function MainPlayer({
 
   useEffect(() => {
     // Create a per-mount generation id to guard delayed stop against StrictMode(dev) remounts.
-    (globalThis as any).__DTV_PLAYER_MOUNT_GEN = ((globalThis as any).__DTV_PLAYER_MOUNT_GEN ?? 0) + 1;
-    mountGenRef.current = (globalThis as any).__DTV_PLAYER_MOUNT_GEN;
+    const nextGen = (playerMountGenByInstance.get(instanceKey) ?? 0) + 1;
+    playerMountGenByInstance.set(instanceKey, nextGen);
+    mountGenRef.current = nextGen;
     return () => {
       disposedRef.current = true;
       destroyPlayer();
 
       const capturedGen = mountGenRef.current;
-      const stopAll = () => {
-        const currentGen = (globalThis as any).__DTV_PLAYER_MOUNT_GEN ?? 0;
+      const stopInstance = () => {
+        const currentGen = playerMountGenByInstance.get(instanceKey) ?? 0;
         if (currentGen !== capturedGen) return;
-        void stopAllDanmakuBackends();
-        void stopAllProxies();
+        playerMountGenByInstance.delete(instanceKey);
+        void stopDanmakuBackends();
+        void stopProxy();
       };
       if (process.env.NODE_ENV === "development") {
-        window.setTimeout(stopAll, 200);
+        window.setTimeout(stopInstance, 200);
       } else {
-        stopAll();
+        stopInstance();
       }
     };
-  }, [destroyPlayer, stopAllDanmakuBackends, stopAllProxies]);
+  }, [destroyPlayer, instanceKey, stopDanmakuBackends, stopProxy]);
 
   useEffect(() => {
     disposedRef.current = false;
