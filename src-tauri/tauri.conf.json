@@ -16,7 +16,7 @@
         "label": "main",
         "url": "/",
         "titleBarStyle": "Overlay",
-        "decorations": true,
+        "decorations": false,
         "trafficLightPosition": {
           "x": 18,
           "y": 33
